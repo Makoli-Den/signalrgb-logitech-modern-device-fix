@@ -5,18 +5,18 @@ G203 Lightsync** mouse, ported directly from **OpenRGB's own driver** for
 this exact board — not from SignalRGB's stock, generic "Logitech Device"
 plugin.
 
+Confirmed working: the device is correctly detected as "Logitech G102/G203
+Lightsync" / type Mouse, taking over from the stock plugin.
+
 ## Why a separate plugin instead of fixing the stock one
 
 SignalRGB already ships its own Logitech support
 (`Signal-x64\Plugins\Logitech\Logitech_Modern_Device.js`, published by
 WhirlwindFX) — a large, generic driver covering dozens of Logitech
 keyboards/mice through dynamic HID++ feature discovery. On this specific
-3-zone mouse it caused intermittent RGB flicker/color corruption. A first
-attempt patched that stock file directly (explicit zero-padding on its HID
-writes) — a plausible fix, but it means hand-patching a file that ships
-with the app itself, which gets overwritten on every SignalRGB update.
+3-zone mouse it caused intermittent RGB flicker/color corruption.
 
-Since OpenRGB already controls this exact mouse cleanly, the better fix is
+Since OpenRGB already controls this exact mouse cleanly, the fix here is
 to stop relying on WhirlwindFX's generic multi-device code entirely and
 port OpenRGB's own small, single-purpose driver for it instead — same idea
 as the [Skyloong GK104 Pro plugin](https://github.com/Makoli-Den/signalrgb-skyloong-gk104pro):
@@ -43,44 +43,47 @@ color lag" — kept here for parity with the known-working reference.
 
 ## Installation
 
-This device is still also claimed by SignalRGB's own built-in "Logitech
-Device" plugin (same VendorId, and `0xC092`/`0xC09D` are in its
-`ProductIDs` list) — installing this add-on alongside it as-is would leave
-two plugins both matching the same mouse. To avoid that, remove those two
-PIDs from the stock plugin's own device list so only this plugin claims the
-mouse, while every other Logitech device on the list is completely
-unaffected:
+This device (VID `046D`, PID `C092`/`C09D`) is also claimed by
+SignalRGB's own built-in "Logitech Device" plugin. Two ways were tried to
+resolve the conflict before finding the real one:
 
-1. Open `Signal-x64\Plugins\Logitech\Logitech_Modern_Device.js` in a text
-   editor (path is under your SignalRGB install, typically
-   `%LOCALAPPDATA%\VortxEngine\app-<version>\Signal-x64\Plugins\Logitech\`).
-2. Find the `ProductIDs` array (inside `LogitechDeviceLibrary`'s
-   constructor) and delete `0xc092,` and `0xc09d,` from it — leave every
-   other entry untouched:
-   ```js
-   // before
-   this.ProductIDs = [
-       0xc081, 0xc082, 0xc083, 0xc084, 0xc085, 0xc087, 0xc088, 0xc08b,
-       0xc08c, 0xc08d, 0xc08f, 0xc090, 0xc091, 0xc092, 0xc094, 0xc095,
-       0xc09d, 0xc332, ...
-   ];
-   // after
-   this.ProductIDs = [
-       0xc081, 0xc082, 0xc083, 0xc084, 0xc085, 0xc087, 0xc088, 0xc08b,
-       0xc08c, 0xc08d, 0xc08f, 0xc090, 0xc091, 0xc094, 0xc095,
-       0xc332, ...
-   ];
+- Editing the stock plugin's `ProductIDs` array to drop this device's
+  PIDs — **doesn't stick**: SignalRGB keeps a second, separately-updated
+  copy of every stock plugin under
+  `%LOCALAPPDATA%\WhirlwindFX\SignalRgb\cache\plugin_cdn\beta\Plugins\...`,
+  which is re-downloaded from WhirlwindFX's server (whole folder replaced,
+  not just the file) on every app start, silently reverting any edit.
+- Installing this repo as an add-on via SignalRGB's Add-on manager — the
+  add-on gets cached under `cache\addons\<hash>\...`, which loads with
+  *lower* priority than that CDN copy, so the stock plugin kept winning
+  the VID/PID match regardless.
+
+**The actual documented mechanism** (per
+[SignalRGB's own plugin-loading docs](https://docs.signalrgb.com/developer/plugins/how-is-a-plugin-loaded-/)):
+plugins placed under the user's own **Documents** folder are the
+highest-priority scan location, persist across SignalRGB updates, and
+override anything elsewhere (bundled app folder or CDN cache) with a
+matching VID/PID. That's the actual fix — no need to touch the stock
+plugin file or fight its auto-updating cache at all:
+
+1. Copy [`Logitech_G102_Lightsync.js`](Logitech_G102_Lightsync.js) from
+   this repo into:
    ```
-   This is a much smaller, easier-to-reapply edit than replacing the whole
-   file — if a SignalRGB update ever restores the stock array, it's a
-   30-second fix to remove the two numbers again, no full file diff to
-   redo.
-3. In SignalRGB, open the add-on manager and add this repository's URL:
-   `https://github.com/Makoli-Den/signalrgb-logitech-modern-device-fix`.
-   Enable the add-on and select the `main` branch (the repo must stay
-   **public** for the branch list to populate).
-4. Restart SignalRGB. It should detect "Logitech G102/G203 Lightsync" as
-   its own device, separate from the stock Logitech entry.
+   %USERPROFILE%\Documents\WhirlwindFX\Plugins\
+   ```
+   (create the `WhirlwindFX\Plugins` folders if they don't exist yet; if
+   your Documents folder is redirected to OneDrive, use
+   `%USERPROFILE%\OneDrive\Documents\WhirlwindFX\Plugins\` instead).
+2. Restart SignalRGB.
+3. The device should now show up as "Logitech G102/G203 Lightsync" /
+   type Mouse in the device list, replacing the old "Logitech Device" /
+   Dongle entry for this specific PID. Enable it if it comes up disabled
+   (carries over from the previous device's enabled state).
+
+No Add-on manager install needed at all with this method — it's a plain
+file drop, and it survives both SignalRGB app updates and the CDN plugin
+cache's own auto-refresh, since neither of those touch the Documents
+folder.
 
 ## Known limitations
 
@@ -90,11 +93,10 @@ unaffected:
   SignalRGB's own effect library already covers that role for a
   Canvas-driven device.
 - No macro/button-input handling — this plugin only drives lighting.
-- Not tested against a real device yet; please report back whether the
-  flicker/corruption is actually gone and whether the 3 zones map to the
-  right physical LEDs (left/logo/right) — if a zone's color looks swapped,
-  it's a one-line fix in `LEDS` / `setColors()`'s zone-index bytes
-  (`0x01`/`0x02`/`0x03`).
+- Zone-to-physical-LED mapping (Left/Logo/Right) hasn't been visually
+  confirmed against the real hardware yet — if a zone's color looks
+  swapped, it's a one-line fix in `LEDS` / `setColors()`'s zone-index
+  bytes (`0x01`/`0x02`/`0x03`).
 
 ## Files
 
