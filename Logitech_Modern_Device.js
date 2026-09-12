@@ -21,6 +21,25 @@ export function Size() {
 export function DeviceType() {
 	return "dongle";
 }
+// G HUB / Logi Options+ open the same HID++ interface this plugin does.
+// lghub_agent.exe is the actual background service that talks to the
+// hardware — it keeps running even when the lghub.exe tray UI is closed,
+// so it's the one that matters most here. Both apps writing/reading the
+// same shared receiver interface concurrently is a plausible source of
+// intermittent corruption independent of anything in this file's own
+// packet-building code: SignalRGB has no way to take exclusive ownership
+// of a HID device from here, so the platform-level fix is to have
+// SignalRGB detect and prompt to close whichever of these is running.
+export function ConflictingProcesses() {
+	return [
+		"lghub.exe",
+		"lghub_agent.exe",
+		"lghub_updater.exe",
+		"lghub_system_tray.exe",
+		"LogiOptionsPlus.exe",
+		"LogiOptionsMgr.exe",
+	];
+}
 export function Validate(endpoint) {
 	return (
 		(endpoint.interface === 1 && endpoint.usage === 0x0001) ||
