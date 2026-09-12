@@ -1,110 +1,101 @@
-# SignalRGB Logitech plugin — per-key-lighting corruption fix
+# SignalRGB plugin for Logitech G102 / G203 Lightsync
 
-A patched copy of SignalRGB's own stock **"Logitech Device"** plugin
-(`Publisher: WhirlwindFX`, ships bundled with the SignalRGB app itself at
-`Signal-x64\Plugins\Logitech\Logitech_Modern_Device.js`), with a targeted
-fix for intermittent RGB flicker/color corruption on small per-key-lighting
-devices (e.g. the **Logitech G102**, a 3-zone mouse using the PerKeyLighting
-V2 protocol).
+A small, standalone native SignalRGB device plugin for the **Logitech G102 /
+G203 Lightsync** mouse, ported directly from **OpenRGB's own driver** for
+this exact board — not from SignalRGB's stock, generic "Logitech Device"
+plugin.
 
-This is **not** a new/separate device add-on — it's the same file WhirlwindFX
-ships, with two small changes layered on top. See "Why this isn't an
-Add-on-manager install" below for why it has to be applied by hand.
+## Why a separate plugin instead of fixing the stock one
 
-## Symptom
+SignalRGB already ships its own Logitech support
+(`Signal-x64\Plugins\Logitech\Logitech_Modern_Device.js`, published by
+WhirlwindFX) — a large, generic driver covering dozens of Logitech
+keyboards/mice through dynamic HID++ feature discovery. On this specific
+3-zone mouse it caused intermittent RGB flicker/color corruption. A first
+attempt patched that stock file directly (explicit zero-padding on its HID
+writes) — a plausible fix, but it means hand-patching a file that ships
+with the app itself, which gets overwritten on every SignalRGB update.
 
-RGB updates on the mouse "jump"/flicker rather than transitioning smoothly,
-and the flicker is color-dependent: purple briefly flickers red, bright cyan
-flickers green, blue sometimes goes dark entirely. Intermittent — not every
-frame/cycle.
+Since OpenRGB already controls this exact mouse cleanly, the better fix is
+to stop relying on WhirlwindFX's generic multi-device code entirely and
+port OpenRGB's own small, single-purpose driver for it instead — same idea
+as the [Skyloong GK104 Pro plugin](https://github.com/Makoli-Den/signalrgb-skyloong-gk104pro):
+reverse-engineer the exact protocol OpenRGB already gets right, reimplement
+it standalone for SignalRGB's plugin API.
 
-## Root cause (best current theory)
+## Protocol credit
 
-`LogitechProtocol.setLongFeature()` builds the outgoing HID++ "Long" report
-like this (stock code):
+Ported from [OpenRGB](https://gitlab.com/CalcProgrammer1/OpenRGB)'s
+`Controllers/LogitechController/LogitechG203LController/` (GPL-2.0-or-later).
+OpenRGB registers the G102 under the name "Logitech G203 Lightsync" — it's
+the same board with the same USB VID/PID (`046D:C092`, alt PID `C09D`),
+just a different cosmetic name/color.
 
-```js
-const packet = [this.MessageTypes.LongMessage, this.Config.ConnectionMode, ...data];
-device.write(packet, 20);
-```
-
-A HID++ 2.0 Long report is **always exactly 20 bytes on the wire** — but
-`packet` here is only as long as `data` makes it. For most stock devices
-this rarely matters: a keyboard's per-key lighting sends LED data in full
-16-byte chunks almost every frame, so `packet` reaches 20 bytes anyway.
-
-The G102 (and other small 3-zone PerKeyLightingV2 mice) is different: it
-only ever has 3 LED zones, and `grabColors()` only includes a zone in the
-outgoing data **if its color actually changed since the last frame**. That
-means the real payload is often just 4-12 bytes — `packet` never comes close
-to 20 bytes, on *every single frame*, not just an occasional tail chunk.
-
-`device.write(packet, 20)` is told the buffer is 20 bytes despite `packet`
-itself being shorter, and relies on the SDK's native implementation to
-zero-fill the difference. If that native write buffer is reused between
-calls without being explicitly cleared, a short write can leave stale bytes
-from a *previous* write sitting at the tail of the buffer. The device's own
-protocol has no explicit length field for this command — it reads the fixed
-20-byte payload window as a fixed number of (zoneId, R, G, B) quad slots
-regardless of how much "real" data was sent. Leftover garbage at the tail
-gets read as a bogus extra zone update, and — if the stale zoneId byte
-happens to alias a real zone (0/1/2 are small, easy to hit by chance) —
-overwrites that zone's real color with garbage. This lines up with the
-symptom being intermittent and worse right when the changed-zone count
-drops between frames (e.g. 3 zones changing → 1 zone changing).
-
-Two previous fix attempts (padding the LED-data sub-chunk to 16 bytes inside
-`SendPerKeyLightingPacket`, and clamping/rounding color values) targeted
-different layers and didn't help — this targets the actual wire-packet
-length mismatch instead.
-
-## The fix
-
-`setShortFeature()` and `setLongFeature()` now build a full, explicitly
-zero-filled array of the declared wire length (7 / 20 bytes) themselves,
-and copy `data` into it, instead of concatenating a short array and handing
-it to `device.write()` to pad:
-
-```js
-const packet = new Array(20).fill(0x00);
-packet[0] = this.MessageTypes.LongMessage;
-packet[1] = this.Config.ConnectionMode;
-for (let i = 0; i < data.length; i++) { packet[2 + i] = data[i]; }
-device.write(packet, 20);
-```
-
-This can't make anything worse even if the native binding already zero-pads
-correctly — it's a no-op in that case. If it doesn't, this removes the
-possibility entirely.
-
-Also kept: a `clampColor()` guard on `device.color()` output (rounds/clamps
-to 0-255 integers before packing into a packet) — harmless and technically
-correct regardless of whether it was the real cause.
+The protocol itself is deliberately simple compared to the generic HID++
+feature-discovery approach: two feature indices are hardcoded (`0x0E` for
+mode-setting, `0x12` for direct RGB) rather than looked up dynamically, and
+every color update always sends a full, explicitly zero-filled 20-byte
+report for all 3 zones — no "only send changed zones" optimization, which
+is exactly the class of thing that caused the corruption in the generic
+plugin. OpenRGB's own `DeviceUpdateLEDs()` also sends each color+apply pair
+**twice** per update, commented in their source as a "dirty workaround for
+color lag" — kept here for parity with the known-working reference.
 
 ## Installation
 
-**This is not installed through SignalRGB's Add-on manager.** The Add-on
-manager adds a *new* plugin — but this device is already claimed by
-SignalRGB's own built-in "Logitech Device" plugin (same VendorId `0x046d`
-that basically every Logitech peripheral uses), so a second plugin
-registered for the same vendor would conflict rather than cleanly override
-it. Instead, replace the stock file directly:
+This device is still also claimed by SignalRGB's own built-in "Logitech
+Device" plugin (same VendorId, and `0xC092`/`0xC09D` are in its
+`ProductIDs` list) — installing this add-on alongside it as-is would leave
+two plugins both matching the same mouse. To avoid that, remove those two
+PIDs from the stock plugin's own device list so only this plugin claims the
+mouse, while every other Logitech device on the list is completely
+unaffected:
 
-1. Close SignalRGB.
-2. Find your SignalRGB install's plugin folder — typically:
-   `%LOCALAPPDATA%\VortxEngine\app-<version>\Signal-x64\Plugins\Logitech\Logitech_Modern_Device.js`
-3. Back up that file somewhere first, just in case.
-4. Replace it with [`Logitech_Modern_Device.js`](Logitech_Modern_Device.js) from this repo.
-5. Start SignalRGB.
+1. Open `Signal-x64\Plugins\Logitech\Logitech_Modern_Device.js` in a text
+   editor (path is under your SignalRGB install, typically
+   `%LOCALAPPDATA%\VortxEngine\app-<version>\Signal-x64\Plugins\Logitech\`).
+2. Find the `ProductIDs` array (inside `LogitechDeviceLibrary`'s
+   constructor) and delete `0xc092,` and `0xc09d,` from it — leave every
+   other entry untouched:
+   ```js
+   // before
+   this.ProductIDs = [
+       0xc081, 0xc082, 0xc083, 0xc084, 0xc085, 0xc087, 0xc088, 0xc08b,
+       0xc08c, 0xc08d, 0xc08f, 0xc090, 0xc091, 0xc092, 0xc094, 0xc095,
+       0xc09d, 0xc332, ...
+   ];
+   // after
+   this.ProductIDs = [
+       0xc081, 0xc082, 0xc083, 0xc084, 0xc085, 0xc087, 0xc088, 0xc08b,
+       0xc08c, 0xc08d, 0xc08f, 0xc090, 0xc091, 0xc094, 0xc095,
+       0xc332, ...
+   ];
+   ```
+   This is a much smaller, easier-to-reapply edit than replacing the whole
+   file — if a SignalRGB update ever restores the stock array, it's a
+   30-second fix to remove the two numbers again, no full file diff to
+   redo.
+3. In SignalRGB, open the add-on manager and add this repository's URL:
+   `https://github.com/Makoli-Den/signalrgb-logitech-modern-device-fix`.
+   Enable the add-on and select the `main` branch (the repo must stay
+   **public** for the branch list to populate).
+4. Restart SignalRGB. It should detect "Logitech G102/G203 Lightsync" as
+   its own device, separate from the stock Logitech entry.
 
-**Caveat:** this file ships as part of the SignalRGB application itself, so
-a future SignalRGB update will overwrite it back to stock and you'll need
-to reapply this patch after updating. That's an inherent tradeoff of
-patching a bundled stock file rather than installing a separate add-on —
-there's no clean substitution mechanism for "replace the built-in Logitech
-plugin" the way there is for adding an entirely new device.
+## Known limitations
 
-## Credit
+- Only Direct/Canvas lighting is implemented (plus Forced Color and
+  Shutdown Color) — the mouse's built-in effects (Cycle/Wave/Breathing/
+  Colormixing) that OpenRGB also exposes aren't wired up here, since
+  SignalRGB's own effect library already covers that role for a
+  Canvas-driven device.
+- No macro/button-input handling — this plugin only drives lighting.
+- Not tested against a real device yet; please report back whether the
+  flicker/corruption is actually gone and whether the 3 zones map to the
+  right physical LEDs (left/logo/right) — if a zone's color looks swapped,
+  it's a one-line fix in `LEDS` / `setColors()`'s zone-index bytes
+  (`0x01`/`0x02`/`0x03`).
 
-Base file is WhirlwindFX's own official SignalRGB plugin (ships unobfuscated
-with the app). This repo only adds the two changes described above.
+## Files
+
+- `Logitech_G102_Lightsync.js` — the plugin.
